@@ -1,0 +1,483 @@
+---
+title: "MATH 372 FINAL Markdown"
+author: "Dante Thomas"
+date: "2024-11-07"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# This program is going to do each step of the regression/modeling process with a different function
+  
+
+```{r setup, include=FALSE}
+#calling libraries
+knitr::opts_chunk$set(echo = TRUE)
+library(ISLR2)
+library(leaps)
+library(glmnet)
+library(car)
+library(lmtest)
+```
+
+
+
+#Wrapper function:
+```{r}
+regression <- function( file_path = NULL, data_name = NULL,
+                        response_name = NULL , predict_flag = TRUE, training_ratio = .5) {
+  
+  #downloading and cleaing the data
+  data <- download(file_path = file_path, data_name = data_name)
+  data <-  preprocess(data, response_name = response_name)
+  train <- training_set(X = data, ratio = training_ratio)
+  Y <- data[train, response_name]
+  Resp <- data[, response_name]
+  train_data <- data[train,]
+ 
+  #Variable selection
+  print("Variable Selection: ")
+  print("Type 'BS' for best subset, or 'LASSO' for Lasso")
+  #Scanner loop
+  repeat {
+    type <- scan(what = "character", nmax = 1, quiet = TRUE)
+    type = "BS"
+    if (type == "BS") {
+      print("How many variables?: ")
+      num_var <- scan(what = "character", nmax = 1, quiet = TRUE)
+      break
+    }
+    if (type == "LASSO") {
+      type = "LASSO"
+      break
+    }
+    else {
+      print("Incorrect input! Try again.")
+    }
+  }
+  
+  #Calling variable selection function
+  variables <- variable_selection(X = train_data, Y = Y, type = type, variable_number = num_var)
+  index <- which(variables != 0)
+  if(type == "LASSO") {
+    index <- index - 1
+  }
+  X <- train_data[, index]
+  
+  #creating model
+  if(predict_flag == FALSE) {
+     model <- final_model(X = as.data.frame(X), response_name = Resp[train])
+     coefs <- coef(model)
+     predictor_names <- colnames(X)
+  }
+  else {
+    return("UNDER CONSTRUCTION!")
+  }
+  
+  #Running diagnostics and rating model performance
+  diagnostic(model = model, data = X, response_name, response_vector = Y)
+  rating(model = model, data = data, response = Resp, train = train, response_name = response_name)
+  
+  
+  return(model)
+  
+}
+```
+
+#Data download function:
+```{r}
+
+download <- function(file_path = NULL, data_name) {
+  #For built in data packages
+    if(is.null(file_path)) {
+    input = data_name
+    return(input)
+    }
+  #Reads in .csv
+  if(endsWith(file_path, ".csv")) {
+    input <- read.csv(file_path, sep=";")
+    return(input)
+  }
+  #Reads in text files
+  input <- read.table(file_path, header = TRUE, sep = ",", stringsAsFactors = TRUE)
+  return(input)
+}
+```
+
+#Preporcessing function:
+```{r}
+
+preprocess <- function(data, response_name) {
+  #Getting response name
+  response_name <- as.character(response_name)
+  
+  #Summary
+  print(summary(data))
+
+  
+  #EDA through plots, box plots and pairwise scatter
+  pairwise_plots(data = data)
+  boxP(data, response_name)
+  
+  features_to_remove <- NULL
+  word = "."
+  
+  #List number of NA's in each column
+  num_NA <- sort(colSums(is.na(data)), decreasing = FALSE)
+  print(num_NA)
+  
+  
+  #Removing predicors
+  print("Choose predictors to remove:")
+  print("Type done to finish")
+  #Scanner loop
+  repeat {
+    word <- scan(what = "character", nmax = 1, quiet = TRUE)
+    if (word == "done") {
+    break
+    }
+    features_to_remove <- c(features_to_remove, which(names(data) == word))
+  }
+  
+  if (!is.null(features_to_remove)) {
+    data <- data[-features_to_remove]
+  }
+  
+  #Ommiting NA's
+  data <- na.omit(data)
+  
+  print("Do you want to see another summary?")
+  print("if so, type yes")
+  #Scanner loop
+  repeat {
+    word <- scan(what = "character", nmax = 1, quiet = TRUE)
+    if (word == "yes") {
+      print(summary(data))
+      break
+    }
+    else {
+      break
+    }
+  }
+  
+  #Number of remaining rows after cleaning
+  message("Number of observations: ", nrow(data))
+  
+  return(data)
+}
+```
+
+
+#Variable selection function:
+```{r}
+variable_selection <- function(X, Y, type, variable_number){
+  #Best subset selection
+  if(type == "BS"){
+    regfit.best <- regsubsets(Y ~ ., data = as.data.frame(X), method = "exhaustive", nvmax = ncol(X))
+    coefficients <- coef(regfit.best, variable_number)
+    return(coefficients)
+  }
+  #Lasso variable selction
+  if(type == "LASSO"){
+    lambda <- lambda_grid()
+    cv.out <- cv.glmnet(as.matrix(X), Y, alpha = 1, lambda = lambda)
+    best.lambda <- cv.out$lambda.min
+    model <- glmnet( X, Y, alpha = 1, lambda = best.lambda)
+    coefficients <- coef(model)
+    return(coefficients)
+  }
+}
+```
+
+#Training, OLS, Ridge, LASSO function: 
+```{r}
+model_train <- function(X, Y, type) {
+  lambda <- lambda_grid()
+  #Making min lambda for ridge
+  if(type == "Ridge") {
+    model <- cv.glmnet(x = as.matrix(X), y = Y, alpha = 0, lambda = lambda)
+    best_lambda <- model$lambda.min
+    return(best_lambda)
+  }
+  #Making min lambda for lasso
+  if(type == "Lasso") {
+    model <- cv.glmnet(x = as.matrix(X), y = Y, alpha = 1, lambda = lambda)
+    best_lambda <- model$lambda.min
+    return(best_lambda)
+  }  
+}
+```
+
+```{r}
+final_model <- function(X, type = "", lambda = 0, response_name) {
+  set.seed(1)
+
+  #Trainging ridge model
+  if(type == "Ridge") {
+    final_model <- glmnet(x = X, y = response_name, alpha = 0, lambda = lambda)
+  }
+  #Training lasso model
+   else if(type == "Lasso") {
+    final_model <- glmnet(x = X , y = response_name, alpha = 1, lambda = lambda)
+   }
+  #Training OLS model
+  else {
+   
+    final_model <- lm(response_name ~ . , data = X)
+  }
+    return(final_model)
+}
+```
+
+#Function to run all of the diagnostic tests:
+```{r}
+diagnostic <- function(model, data, response, response_vector) {
+  #Breusch-Pagan test
+  var <- variance(model)$p.value
+  if (var > 0.05) {
+    print("Constant varaince: Fail to reject")
+    print(cat("P-value: ", var))
+  }
+  else {
+    print("Non-constant variance: Reject BP-test P-value")
+    print(cat("P-value: ", var))
+  }
+
+  #Shapiro-Wilk test
+  norm <- normalacy(model)$p.value
+  if (norm > 0.05) {
+    print("Normal: Fail to reject:")
+    print(cat("P-value: ", norm))
+  }
+  else {
+    print("Not normal: Reject Shapiro-wilk-test")
+    print(cat("P-value: ", norm))
+  }
+  
+  #High leverage points
+  lev <-  leverage_points(model, data)
+  print("High leverage points:")
+  print(lev)
+ 
+  #Influenctial points
+  influence <- influenctial_points(model, response_vector, data)
+  print("Influenctial points:")
+  print(influence)
+  
+  #Residual plots
+  plot <- outliers(model)
+}
+```
+
+#Model rating Function:
+```{r}
+rating <- function(model, data, response, train, response_name) {
+  #Making test set
+  test <- -(train)
+  #Training comnparison models
+  lasso_lambda <- model_train(X = data[train,], Y = response[train], type = "Lasso")
+  ridge_lambda <- model_train(X = data[train,], Y = response[train], type = "Ridge")
+  
+  lasso_model <- final_model(X = data[train,], type = "Lasso", response_name = response[train], lambda = lasso_lambda)
+  ridge_model <- final_model(X = data[train,], type = "Ridge", response_name = response[train], lambda = ridge_lambda)
+  ols_model <- final_model(X = data[train,], response_name = response[train])
+  
+  #Running predictions on all models
+  lasso.pred <- predict(lasso_model, s = lasso_lambda, newx = as.matrix(data[test, ]))
+  mspe.lasso <- mean((lasso.pred - response[test])^2)
+
+  ridge.pred <- predict(ridge_model, s = ridge_lambda, newx = as.matrix(data[test, ]))
+  mspe.ridge <- mean((ridge.pred - response[test])^2)  
+  
+  ols.pred <- predict(ols_model, newx = as.matrix(data[test,]))
+  mspe.ols <- mean((ols.pred - response[test])^2)
+  
+  main.pred <- predict(model, newx = as.matrix(data[test,]))
+  mspe.main <- mean((ols.pred - response[test])^2)
+  
+  
+  #Printing all model's MSPE
+  print("MSPE Ridge")
+  print(mspe.ridge)
+  print("MSPE Lasso")
+  print(mspe.lasso)
+  print("MSPE ols")
+  print(mspe.ols)
+  print("Your function")
+  print(mspe.main)
+
+}
+```
+
+#Here are some helper functions:
+```{r}
+# @ Param X = matrix of predictors
+# @ Param Ratio = (0-1) ratio of data for the training set
+#Divides data into a training and test set, returns a index for training data
+training_set <- function(X, ratio){
+  n <- nrow(X)
+  index <- sample(1:n, size = round(n * ratio))
+  return(index)
+}
+
+# Returns a grid of lambda for parameter tuning
+lambda_grid <- function(){
+   return(10^seq(10, -2, length = 100))  
+}
+
+# @Param model = regression model
+# Returns P-value for Sahpiro-Wilk
+normalacy <- function(model){
+  return(shapiro.test(model$residuals))
+}
+
+# @Param model = regression model
+#Returns P-value for Breusch-Pagan test
+variance <- function(model) {
+  bp <- bptest(model)
+  return(bp)
+}
+
+# @Param model = regression model
+# Returns outlier points for data
+outliers <- function(model) {
+  return(plot(model))
+}
+
+#@Param model = regression model
+#@Param data = data regression takes
+#Returns high leverage points for regression
+leverage_points <- function(model, data) {
+  leverage <- hatvalues(model)
+
+  n <- nrow(data)
+  p <- length(coef(model))
+
+  high_leverage_threshold <- 2 * (p + 1) / n
+  high_leverage_points <- which(leverage > high_leverage_threshold)
+  return(high_leverage_points)
+}
+
+#@Param model = regression model
+#@Param response = response vector
+#@Param data = data regression takes
+influenctial_points <- function(model, response, data) {
+  leverage <- hatvalues(model)
+  n <- nrow(data)
+  p <- length(coef(model))
+
+
+  deletion_residuals <- (response - model$fitted.values) / (1 - leverage)
+  d_star <- deletion_residuals / sd(deletion_residuals)
+
+  influencial_threshold <- qt(1 - 0.05 / 2, df = n - p - 1)
+  influencial_points <- which(abs(d_star) > influencial_threshold)
+
+  return(influencial_points)
+}
+
+#@Param variables coefficient object from model
+#@Param data = data regression takes
+#Returns an index for predictors in the data set
+variable_index <- function(variables, data) {
+  index = ""
+  names <- names(variables)
+  names <- names[-1]
+  for (i in 0:length(names)) {
+    index <- append(index, which(names(data) == names[i]))
+  }
+  return(index)  
+}
+
+#@Param data = data regression takes
+#@Param response_name = response name as string
+#Returns box plots of predictors and repsonse
+boxP <- function(data, response_name) {
+  
+  response <- data[[response_name]]
+
+  print("Type Variable to see box plot: ")
+  print("Type done to finish")
+  pred <- "."
+  repeat {
+    print("Type predictor name")
+    
+    pred <- scan(what = "character", nmax = 1, quiet = TRUE)
+    if (pred  == "done") {
+    break
+    }
+    prediction <- data[[pred]]
+    if (is.null(prediction)) {
+      print("Not a column name! Try again.")
+      next
+    }
+    else {
+      boxplot(response ~ prediction, xlab = pred, ylab = response)
+    }
+  }
+}
+pairwise_plots <- function(data) {
+  
+  result <- try(pairs(data), silent =  FALSE)
+      if (inherits(result, "try-error")) {
+        print("Removing non-numeric arguments")
+    
+        # Select only numeric columns for the pair plot
+        numeric_columns <- data[, sapply(data, is.numeric)]
+    
+      # Split numeric_columns into chunks of 9 variables at a time
+      n_vars <- ncol(numeric_columns)
+      chunk_size <- 9
+      num_chunks <- ceiling(n_vars / chunk_size)
+    
+      pdf("myplot.pdf", width = 20, height = 15)
+      for (i in 1:num_chunks) {
+      # Select the subset of numeric variables for this chunk
+      start_col <- (i - 1) * chunk_size + 1
+      end_col <- min(i * chunk_size, n_vars)
+      subset <- numeric_columns[, start_col:end_col]
+      
+      # Set the layout for 3x3 grid (9 plots per page)
+      par(mfrow = c(3, 3))  # Adjust layout for 9 plots per page
+      pairs(subset)
+      
+      }
+    
+    }
+    else {
+      # If no error, plot the entire dataset
+      n_vars <- ncol(data)
+      chunk_size <- 9
+      num_chunks <- ceiling(n_vars / chunk_size)
+    
+      pdf("myplot.pdf", width = 20, height = 15)
+      for (i in 1:num_chunks) {
+        # Select the subset of data for this chunk
+        start_col <- (i - 1) * chunk_size + 1
+        end_col <- min(i * chunk_size, n_vars)
+        subset <- data[, start_col:end_col]
+      
+      # Set the layout for 3x3 grid (9 plots per page)
+      par(mfrow = c(3, 3))  # Adjust layout for 9 plots per page
+      pairs(subset)
+    }
+  }
+  
+  dev.off()
+  system("open myplot.pdf")
+  dev.off()
+  
+}
+
+
+
+```
+
+#Main function
+```{r}
+#Calling wrapper function
+final <- regression(file_path = "/Users/dantethomas/Downloads/wine+quality/winequality-red.csv", data_name = wine , response_name = "quality", predict_flag = FALSE, training_ratio = 0.8)
+
+```
+
+
